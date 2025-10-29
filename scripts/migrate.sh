@@ -7,5 +7,14 @@ set -euo pipefail
 : "${DB_USER:=gigam_user}"
 : "${DB_PASS:=gigam_pass}"
 
-mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < schema/001_core.sql
-echo "OK schema migrated."
+apply_sql() {
+  local file="$1"
+  echo ">> Applying $file"
+  mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$file"
+}
+
+for f in $(ls -1 schema/*.sql | sort); do
+  apply_sql "$f"
+done
+
+echo "OK all migrations applied."
