@@ -1,0 +1,36 @@
+# Binaries
+gigamctl
+*.exe
+*.dll
+
+# Objetos/artefactos de compilación
+*.o
+*.a
+*.so
+*.dylib
+
+# Directorios de build comunes
+/build/
+/dist/
+/out/
+
+# Config/env (mantén el example)
+.env
+.env.*
+!.env.example
+
+# Logs y dumps
+logs/
+*.log
+*.sql
+*.dump
+
+# Herramientas/editores
+*.swp
+*~
+.DS_Store
+tags
+
+# Núcleos de crash
+core
+
