@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
+#include <stdbool.h>
 
 /* ---------- Helpers / UX ---------- */
 
@@ -21,7 +22,7 @@ static void usage_root(void) {
     "  quote     add|list\n"
     "  bet       place|list\n"
     "  settle    event\n"
-    "  report    pnl|runner-commissions|bettor-balances|runner-balances\n"
+    "  report    pnl|runner-commissions|bettor-balances|runner-balances [--format table|json|csv] [--out <file>]\n"
     "  risk      list\n"
   );
 }
@@ -48,6 +49,139 @@ static void esc_str(MYSQL* c, const char* in, char* out, size_t outsz) {
   memcpy(out, tmp, (size_t)m);
   out[m]='\0';
   free(tmp);
+}
+
+/* ---------- Report formatting helpers (table|json|csv) ---------- */
+
+typedef enum {
+  RF_TABLE = 0,
+  RF_JSON  = 1,
+  RF_CSV   = 2
+} rf_format_t;
+
+static rf_format_t rf_format_from_str(const char* s) {
+  if (!s) return RF_TABLE;
+  char buf[16]; size_t n=0;
+  for (; s[n] && n<sizeof(buf)-1; ++n) {
+    char ch = s[n];
+    if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+    buf[n] = ch;
+  }
+  buf[n]=0;
+  if (strcmp(buf,"json")==0) return RF_JSON;
+  if (strcmp(buf,"csv")==0)  return RF_CSV;
+  return RF_TABLE;
+}
+
+static void json_escape(FILE* f, const char* s) {
+  if (!s) s="";
+  fputc('"', f);
+  for (const unsigned char* p=(const unsigned char*)s; *p; ++p) {
+    unsigned char ch=*p;
+    switch(ch){
+      case '\\': fputs("\\\\",f); break;
+      case '\"': fputs("\\\"",f); break;
+      case '\b': fputs("\\b", f); break;
+      case '\f': fputs("\\f", f); break;
+      case '\n': fputs("\\n", f); break;
+      case '\r': fputs("\\r", f); break;
+      case '\t': fputs("\\t", f); break;
+      default:
+        if (ch < 0x20) fprintf(f,"\\u%04x", ch);
+        else fputc(ch,f);
+    }
+  }
+  fputc('"', f);
+}
+
+static void csv_escape(FILE* f, const char* s) {
+  if (!s) s="";
+  bool need_quotes=false;
+  for (const char* p=s; *p; ++p) {
+    if (*p==',' || *p=='"' || *p=='\n' || *p=='\r') { need_quotes=true; break; }
+  }
+  if (!need_quotes && s[0] != ' ') { fputs(s, f); return; }
+  fputc('"', f);
+  for (const char* p=s; *p; ++p) {
+    if (*p=='"') fputc('"', f);
+    fputc(*p, f);
+  }
+  fputc('"', f);
+}
+
+static int print_result_json(MYSQL_RES* r, FILE* out) {
+  unsigned int nf = mysql_num_fields(r);
+  MYSQL_FIELD* flds = mysql_fetch_fields(r);
+  fputs("[\n", out);
+  bool first=true;
+  MYSQL_ROW row;
+  while ((row=mysql_fetch_row(r))) {
+    unsigned long* lengths = mysql_fetch_lengths(r);
+    (void)lengths; /* values are C-strings; lengths unused for now */
+    if (!first) fputs(",\n", out);
+    first=false;
+    fputs("  {", out);
+    for (unsigned int i=0;i<nf;i++) {
+      if (i) fputs(", ", out);
+      json_escape(out, flds[i].name ? flds[i].name : "");
+      fputs(": ", out);
+      json_escape(out, row[i] ? row[i] : "");
+    }
+    fputs("}", out);
+  }
+  fputs("\n]\n", out);
+  return 0;
+}
+
+static int print_result_csv(MYSQL_RES* r, FILE* out) {
+  unsigned int nf = mysql_num_fields(r);
+  MYSQL_FIELD* flds = mysql_fetch_fields(r);
+  /* header */
+  for (unsigned int i=0;i<nf;i++) {
+    if (i) fputc(',', out);
+    csv_escape(out, flds[i].name ? flds[i].name : "");
+  }
+  fputc('\n', out);
+  /* rows */
+  MYSQL_ROW row;
+  while ((row=mysql_fetch_row(r))) {
+    for (unsigned int i=0;i<nf;i++) {
+      if (i) fputc(',', out);
+      csv_escape(out, row[i] ? row[i] : "");
+    }
+    fputc('\n', out);
+  }
+  return 0;
+}
+
+static int print_result_table(MYSQL_RES* r) {
+  /* mantener comportamiento existente */
+  db_print_result(r);
+  return 0;
+}
+
+static int print_formatted(MYSQL_RES* r, rf_format_t fmt, const char* out_path) {
+  if (!r) return 0;
+  if (fmt == RF_TABLE) {
+    /* table siempre va a stdout, ignoramos out_path */
+    return print_result_table(r);
+  }
+  FILE* out = stdout;
+  FILE* opened = NULL;
+  if (out_path && *out_path) {
+    opened = fopen(out_path, "wb");
+    if (!opened) {
+      fprintf(stderr, "report: unable to open output file: %s\n", out_path);
+      return 1;
+    }
+    out = opened;
+  }
+  int rc = 0;
+  if (fmt == RF_JSON) rc = print_result_json(r, out);
+  else                rc = print_result_csv(r, out);
+
+  if (opened) fclose(opened);
+  return rc;
 }
 
 /* ---------- SPORT ---------- */
@@ -837,21 +971,35 @@ static int cmd_settle(int argc, char** argv, MYSQL* c) {
 
 static int cmd_report(int argc, char** argv, MYSQL* c) {
   if (argc<2){
-    fprintf(stderr,"report pnl|runner-commissions|bettor-balances|runner-balances\n");
+    fprintf(stderr,"report pnl|runner-commissions|bettor-balances|runner-balances [--format table|json|csv] [--out <file>]\n");
     return 2;
   }
   const char* sub=argv[1]; optind=1;
+
   long bm=0; const char* from=NULL; const char* to=NULL; const char* group=NULL;
-  static struct option o[]={{"bookmaker-id",1,0,'b'},{"from",1,0,'f'},{"to",1,0,'t'},{"by",1,0,'g'},{0,0,0,0}};
+  const char* out_path=NULL; rf_format_t fmt = RF_TABLE;
+
+  static struct option o[]={
+    {"bookmaker-id",1,0,'b'},
+    {"from",1,0,'f'},
+    {"to",1,0,'t'},
+    {"by",1,0,'g'},
+    {"format",1,0,'F'},
+    {"out",1,0,'O'},
+    {0,0,0,0}
+  };
   int ch,ix=0;
-  while((ch=getopt_long(argc-1,argv+1,"b:f:t:g:",o,&ix))!=-1){
+  while((ch=getopt_long(argc-1,argv+1,"b:f:t:g:F:O:",o,&ix))!=-1){
     if(ch=='b') bm=atol(optarg);
     else if(ch=='f') from=optarg;
     else if(ch=='t') to=optarg;
     else if(ch=='g') group=optarg;
+    else if(ch=='F') fmt = rf_format_from_str(optarg);
+    else if(ch=='O') out_path=optarg;
     else return 2;
   }
 
+  /* build query per subcommand and then print formatted */
   if (!strcmp(sub,"pnl")) {
     if(!bm||!from||!to){
       fprintf(stderr,"required: --bookmaker-id --from YYYY-MM-DD --to YYYY-MM-DD\n");
@@ -860,23 +1008,30 @@ static int cmd_report(int argc, char** argv, MYSQL* c) {
     char q[1024];
     if (group && !strcmp(group,"runner")) {
       snprintf(q,sizeof(q),
-        "SELECT r.id AS runner_id, r.name, COUNT(b.id) bets, ROUND(SUM(b.stake_cents)/100,2) handle_usd, ROUND(SUM(COALESCE(b.profit_cents,0))/100,2) profit_usd "
+        "SELECT r.id AS runner_id, r.name, COUNT(b.id) AS bets, ROUND(SUM(b.stake_cents)/100,2) AS handle_usd, ROUND(SUM(COALESCE(b.profit_cents,0))/100,2) AS profit_usd "
         "FROM bets b JOIN runners r ON r.id=b.runner_id "
         "WHERE b.bookmaker_id=%ld AND b.status='settled' AND b.settled_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND b.settled_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY) "
         "GROUP BY r.id,r.name ORDER BY profit_usd DESC", bm, from, to);
     } else if (group && !strcmp(group,"bettor")) {
       snprintf(q,sizeof(q),
-        "SELECT bt.id AS bettor_id, bt.code, COUNT(b.id) bets, ROUND(SUM(b.stake_cents)/100,2) handle_usd, ROUND(SUM(COALESCE(b.profit_cents,0))/100,2) profit_usd "
+        "SELECT bt.id AS bettor_id, bt.code, COUNT(b.id) AS bets, ROUND(SUM(b.stake_cents)/100,2) AS handle_usd, ROUND(SUM(COALESCE(b.profit_cents,0))/100,2) AS profit_usd "
         "FROM bets b JOIN bettors bt ON bt.id=b.bettor_id "
         "WHERE b.bookmaker_id=%ld AND b.status='settled' AND b.settled_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND b.settled_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY) "
         "GROUP BY bt.id,bt.code ORDER BY profit_usd ASC", bm, from, to);
     } else {
       snprintf(q,sizeof(q),
-        "SELECT COUNT(id) bets, ROUND(SUM(stake_cents)/100,2) handle_usd, ROUND(SUM(COALESCE(profit_cents,0))/100,2) profit_usd "
+        "SELECT COUNT(id) AS bets, ROUND(SUM(stake_cents)/100,2) AS handle_usd, ROUND(SUM(COALESCE(profit_cents,0))/100,2) AS profit_usd "
         "FROM bets WHERE bookmaker_id=%ld AND status='settled' AND settled_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND settled_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY)",
         bm, from, to);
     }
-    return exec_and_print(c,q);
+    if (db_exec(c,q)!=0) { return 5; }
+    MYSQL_RES* r = mysql_store_result(c);
+    if (r) {
+      int rc = print_formatted(r, fmt, out_path);
+      mysql_free_result(r);
+      return rc;
+    }
+    return 0;
   }
 
   if (!strcmp(sub,"runner-commissions")) {
@@ -886,11 +1041,18 @@ static int cmd_report(int argc, char** argv, MYSQL* c) {
     }
     char q[1024];
     snprintf(q,sizeof(q),
-      "SELECT r.id runner_id, r.name, ROUND(SUM(rc.commission_cents)/100,2) commissions_usd, COUNT(rc.id) items "
+      "SELECT r.id AS runner_id, r.name, ROUND(SUM(rc.commission_cents)/100,2) AS commissions_usd, COUNT(rc.id) AS items "
       "FROM runner_commissions rc JOIN bets b ON b.id=rc.bet_id JOIN runners r ON r.id=rc.runner_id "
       "WHERE b.bookmaker_id=%ld AND b.settled_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND b.settled_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY) "
       "GROUP BY r.id,r.name ORDER BY commissions_usd DESC", bm, from, to);
-    return exec_and_print(c,q);
+    if (db_exec(c,q)!=0) { return 5; }
+    MYSQL_RES* r = mysql_store_result(c);
+    if (r) {
+      int rc = print_formatted(r, fmt, out_path);
+      mysql_free_result(r);
+      return rc;
+    }
+    return 0;
   }
 
   if (!strcmp(sub,"bettor-balances")) {
@@ -900,13 +1062,20 @@ static int cmd_report(int argc, char** argv, MYSQL* c) {
     }
     char q[1024];
     snprintf(q,sizeof(q),
-      "SELECT bt.id bettor_id, bt.code, ROUND(-SUM(COALESCE(b.profit_cents,0))/100,2) owed_gross_usd, "
-      "ROUND(COALESCE((SELECT SUM(pr.amount_cents) FROM payouts_bettor pr WHERE pr.bettor_id=bt.id AND pr.created_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND pr.created_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY)),0)/100,2) paid_usd, "
-      "ROUND((-SUM(COALESCE(b.profit_cents,0)) - COALESCE((SELECT SUM(pr.amount_cents) FROM payouts_bettor pr WHERE pr.bettor_id=bt.id AND pr.created_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND pr.created_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY)),0))/100,2) balance_usd "
+      "SELECT bt.id AS bettor_id, bt.code, ROUND(-SUM(COALESCE(b.profit_cents,0))/100,2) AS owed_gross_usd, "
+      "ROUND(COALESCE((SELECT SUM(pr.amount_cents) FROM payouts_bettor pr WHERE pr.bettor_id=bt.id AND pr.created_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND pr.created_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY)),0)/100,2) AS paid_usd, "
+      "ROUND((-SUM(COALESCE(b.profit_cents,0)) - COALESCE((SELECT SUM(pr.amount_cents) FROM payouts_bettor pr WHERE pr.bettor_id=bt.id AND pr.created_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND pr.created_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY)),0))/100,2) AS balance_usd "
       "FROM bets b JOIN bettors bt ON bt.id=b.bettor_id "
       "WHERE b.bookmaker_id=%ld AND b.status='settled' AND b.settled_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND b.settled_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY) "
       "GROUP BY bt.id,bt.code ORDER BY balance_usd DESC", from,to, from,to, bm, from,to);
-    return exec_and_print(c,q);
+    if (db_exec(c,q)!=0) { return 5; }
+    MYSQL_RES* r = mysql_store_result(c);
+    if (r) {
+      int rc = print_formatted(r, fmt, out_path);
+      mysql_free_result(r);
+      return rc;
+    }
+    return 0;
   }
 
   if (!strcmp(sub,"runner-balances")) {
@@ -916,14 +1085,21 @@ static int cmd_report(int argc, char** argv, MYSQL* c) {
     }
     char q[1024];
     snprintf(q,sizeof(q),
-      "SELECT r.id runner_id, r.name, "
-      "ROUND(COALESCE(SUM(rc.commission_cents),0)/100,2) commissions_usd, "
-      "ROUND(COALESCE((SELECT SUM(pr.amount_cents) FROM payouts_runner pr WHERE pr.runner_id=r.id AND pr.created_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND pr.created_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY)),0)/100,2) paid_usd, "
-      "ROUND((COALESCE(SUM(rc.commission_cents),0) - COALESCE((SELECT SUM(pr.amount_cents) FROM payouts_runner pr WHERE pr.runner_id=r.id AND pr.created_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND pr.created_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY)),0))/100,2) balance_usd "
+      "SELECT r.id AS runner_id, r.name, "
+      "ROUND(COALESCE(SUM(rc.commission_cents),0)/100,2) AS commissions_usd, "
+      "ROUND(COALESCE((SELECT SUM(pr.amount_cents) FROM payouts_runner pr WHERE pr.runner_id=r.id AND pr.created_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND pr.created_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY)),0)/100,2) AS paid_usd, "
+      "ROUND((COALESCE(SUM(rc.commission_cents),0) - COALESCE((SELECT SUM(pr.amount_cents) FROM payouts_runner pr WHERE pr.runner_id=r.id AND pr.created_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND pr.created_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY)),0))/100,2) AS balance_usd "
       "FROM runners r LEFT JOIN runner_commissions rc ON rc.runner_id=r.id LEFT JOIN bets b ON b.id=rc.bet_id "
       "WHERE b.bookmaker_id=%ld AND b.settled_at>=STR_TO_DATE('%s','%%Y-%%m-%%d') AND b.settled_at<DATE_ADD(STR_TO_DATE('%s','%%Y-%%m-%%d'), INTERVAL 1 DAY) "
       "GROUP BY r.id,r.name ORDER BY balance_usd DESC", from,to, from,to, bm, from,to);
-    return exec_and_print(c,q);
+    if (db_exec(c,q)!=0) { return 5; }
+    MYSQL_RES* r = mysql_store_result(c);
+    if (r) {
+      int rc = print_formatted(r, fmt, out_path);
+      mysql_free_result(r);
+      return rc;
+    }
+    return 0;
   }
 
   fprintf(stderr,"unknown report subcommand\n");
@@ -1051,3 +1227,4 @@ int cli_dispatch(int argc, char** argv) {
   db_disconnect(conn);
   return rc;
 }
+

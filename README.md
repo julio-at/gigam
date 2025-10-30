@@ -1,96 +1,102 @@
-# gigam (PoC / MVP)
+# gigamctl
 
-Minimal console CLI in C (MySQL) to manage sports betting entities and operations.
+Command-line tool (PoC) to manage entities and core operations of a betting system: create/list entities, ingest quotes & bets, settle events, generate reports (with export), and review basic risk exposure.
 
-## Features
-- Entities: sports, leagues, teams, bookmakers, runners, bettors, events, quotes, bets
-- Quotes: spread, total, moneyline, threeway, asian split (.25/.75)
-- Bets: place/list
-- Event: set-score/finalize
-- Settle: settle event bets into win/lose/push with payout/profit
-- Runner commissions: per-bet (net or handle)
-- Payout ledger: runner & bettor payouts
-- Reports: P&L, runner commissions, bettor/runner balances
-- Risk: exposure scenarios per event (negative = book loss, positive = book gain)
+> This README references the English and Spanish manuals for full details. The CLI matches the integration that adds `--format {table|json|csv}` and `--out <file>` to `report`.
 
-## Build
+---
+
+## Requirements
+
+- **MySQL/MariaDB** reachable.
+- Build essentials (GCC/Clang, Make).
+
+### Environment variables
+
+`gigamctl` reads DB settings via `db_load_env()`:
+
 ```bash
-sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libmysqlclient-dev
-cp .env.example .env
-export $(grep -v '^#' .env | xargs)
-
-./scripts/migrate.sh
-make clean && make
+export DB_HOST=127.0.0.1
+export DB_PORT=3306
+export DB_USER=root
+export DB_PASS=yourpassword
+export DB_NAME=gigam
 ```
 
-## CLI Quickstart
+---
+
+## Build
+
 ```bash
-# Sports/League/Teams
-./gigamctl sport create --name "Soccer"
-./gigamctl sport list
-./gigamctl league create --sport-id 1 --name "Premier Demo"
-./gigamctl league list --sport-id 1
-./gigamctl team create --league-id 1 --name "Team Alpha"
-./gigamctl team create --league-id 1 --name "Team Beta"
-./gigamctl team list --league-id 1
+make clean && make
+```
+The binary will be available as `./gigamctl`.
 
-# Bookmaker/Runner/Bettor
+---
+
+## Quick Start
+
+Create minimal data, place bets, finalize an event, settle, and run reports.
+
+```bash
+# 1) Seed minimal data
+./gigamctl sport create --name Soccer
+./gigamctl league create --sport-id 1 --name "CR Primera"
+./gigamctl team create --league-id 1 --name "Alajuelense"
+./gigamctl team create --league-id 1 --name "Saprissa"
 ./gigamctl bookmaker create --name "DemoBook" --currency USD
-./gigamctl runner create --bookmaker-id 1 --user runner1 --name "Default Runner" --default
-./gigamctl bettor create --runner-id 1 --code B1001 --name "John Bettor"
+./gigamctl runner create --bookmaker-id 1 --user runner1 --name "Runner 1" --default --scheme net --rate 12
+./gigamctl bettor create --runner-id 1 --code B001 --name "Alice"
+./gigamctl bettor create --runner-id 1 --code B002 --name "Bob"
 
-# Event + Quotes + Bets
-./gigamctl event create --league-id 1 --starts-at "2025-11-02 18:00:00" --home-id 1 --away-id 2
-./gigamctl quote add --event-id 1 --bookmaker-id 1 --market spread --side HOME --line -0.75 --price 1.92 --asian --line-b -0.50 --price-b 1.86
-./gigamctl quote add --event-id 1 --bookmaker-id 1 --market total --side OVER --line 2.5 --price 1.85
-./gigamctl quote add --event-id 1 --bookmaker-id 1 --market moneyline --side HOME --price 1.75
-./gigamctl bet place --bookmaker-id 1 --event-id 1 --runner-id 1 --bettor-id 1 --market spread --side HOME --line -0.75 --price 1.92 --stake 2500 --asian --line-b -0.50 --price-b 1.86
-./gigamctl bet list --bookmaker-id 1
+# 2) Event + quotes + bets
+./gigamctl event create --league-id 1 --starts-at "2025-10-30 20:00" --home-id 1 --away-id 2
+./gigamctl quote add --event-id 1 --bookmaker-id 1 --market moneyline --side HOME --price 1.95
+./gigamctl quote add --event-id 1 --bookmaker-id 1 --market moneyline --side AWAY --price 2.05
+./gigamctl bet place --bookmaker-id 1 --event-id 1 --runner-id 1 --bettor-id 1 --market moneyline --side HOME --price 1.95 --stake 2500
+./gigamctl bet place --bookmaker-id 1 --event-id 1 --runner-id 1 --bettor-id 2 --market moneyline --side AWAY --price 2.05 --stake 3000
 
-# Risk, Finalize and Settle
-./gigamctl risk list --event-id 1
+# 3) Finalize + settle
 ./gigamctl event set-score --event-id 1 --home 2 --away 1 --final
 ./gigamctl settle event --event-id 1
 
-# Reports and payouts
-./gigamctl report pnl --bookmaker-id 1 --from 2025-11-01 --to 2025-11-30
-./gigamctl report pnl --bookmaker-id 1 --from 2025-11-01 --to 2025-11-30 --by runner
-./gigamctl report runner-commissions --bookmaker-id 1 --from 2025-11-01 --to 2025-11-30
-./gigamctl report bettor-balances --bookmaker-id 1 --from 2025-11-01 --to 2025-11-30
-./gigamctl report runner-balances --bookmaker-id 1 --from 2025-11-01 --to 2025-11-30
+# 4) Reports (table/json/csv; json/csv support --out)
+FROM="2025-10-30"; TO="2025-10-30"; mkdir -p reports
+./gigamctl report pnl --bookmaker-id 1 --from "$FROM" --to "$TO"
+./gigamctl report pnl --bookmaker-id 1 --from "$FROM" --to "$TO" --format json
+./gigamctl report pnl --bookmaker-id 1 --from "$FROM" --to "$TO" --format csv --out reports/pnl_global.csv
 
-./gigamctl runner payout --runner-id 1 --amount-cents 1500 --note "Weekly payout" --from 2025-11-01 --to 2025-11-07
-./gigamctl bettor payout --bettor-id 1 --amount-cents 2500 --note "Win 11/02" --from 2025-11-01 --to 2025-11-07
+./gigamctl report pnl --bookmaker-id 1 --from "$FROM" --to "$TO" --by runner --format csv --out reports/pnl_by_runner.csv
+./gigamctl report runner-commissions --bookmaker-id 1 --from "$FROM" --to "$TO" --format csv --out reports/runner_commissions.csv
+./gigamctl report bettor-balances --bookmaker-id 1 --from "$FROM" --to "$TO" --format csv --out reports/bettor_balances.csv
+./gigamctl report runner-balances --bookmaker-id 1 --from "$FROM" --to "$TO" --format json --out reports/runner_balances.json
 ```
 
-## Reset DB (truncate all)
-```sql
-SET FOREIGN_KEY_CHECKS=0;
-TRUNCATE TABLE runner_commissions;
-TRUNCATE TABLE payouts_runner;
-TRUNCATE TABLE payouts_bettor;
-TRUNCATE TABLE bets;
-TRUNCATE TABLE quotes;
-TRUNCATE TABLE events;
-TRUNCATE TABLE teams;
-TRUNCATE TABLE leagues;
-TRUNCATE TABLE sports;
-TRUNCATE TABLE bettors;
-TRUNCATE TABLE runners;
-TRUNCATE TABLE users;
-TRUNCATE TABLE bookmakers;
-SET FOREIGN_KEY_CHECKS=1;
-```
+---
 
-## Reset & Seed
-```bash
-# Soft reset (truncate all tables)
-./scripts/reset_truncate.sh
+## Reporting & Export
 
-# Hard reset (drop/recreate DB + migrations)
-DB_ROOT_USER=root DB_ROOT_PASS='********' ./scripts/reset_hard.sh --yes
+All `report` subcommands share common flags:
+- `--bookmaker-id <id>` (required)
+- `--from <YYYY-MM-DD>` (required)
+- `--to <YYYY-MM-DD>` (required)
+- `--format table|json|csv` (optional; default `table`)
+- `--out <file>` (optional; only for `json`/`csv`; overwrites if exists)
 
-# Seed minimal demo
-./scripts/seed_demo.sh
-```
+> The date filter is `from <= date < (to + 1 day)`; e.g., `--from 2025-10-01 --to 2025-10-31` covers the whole October 2025.  
+> `table` always prints to `stdout` and ignores `--out`.
+
+---
+
+## Documentation
+
+- **English Manual:** [MANUAL.en.md](./MANUAL.en.md)  
+- **Spanish Manual:** [MANUAL.es.md](./MANUAL.es.md)
+
+---
+
+## Notes
+
+- Money amounts are stored internally in **cents** unless the query already returns USD fields.
+- When using `--out`, ensure the target directory exists (no auto-creation).
+- Settlement inserts runner commissions according to runner scheme/rate.
