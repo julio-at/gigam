@@ -90,8 +90,8 @@ All `report` subcommands share common flags:
 
 ## Documentation
 
-- **English Manual:** [MANUAL.en.md](./MANUAL.en.md)  
-- **Spanish Manual:** [MANUAL.es.md](./MANUAL.es.md)
+- **English Manual:** [MANUAL.en.md](./docs/MANUAL.en.md)  
+- **Spanish Manual:** [MANUAL.es.md](./docs/MANUAL.es.md)
 
 ---
 
