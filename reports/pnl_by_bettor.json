@@ -1,0 +1,4 @@
+[
+  {"bettor_id": "2", "code": "B002", "bets": "1", "handle_usd": "30.00", "profit_usd": "-30.00"},
+  {"bettor_id": "1", "code": "B001", "bets": "1", "handle_usd": "25.00", "profit_usd": "23.75"}
+]

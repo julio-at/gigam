@@ -13,6 +13,7 @@ gigamctl
 /build/
 /dist/
 /out/
+/reports/
 
 # Config/env (mantén el example)
 .env
